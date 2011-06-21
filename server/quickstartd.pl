@@ -3,6 +3,8 @@
 use strict;
 use warnings;
 
+use Getopt::Std;
+use Proc::Daemon;
 use HTTP::Daemon;
 use HTTP::Status;
 use Cwd 'abs_path';
@@ -15,7 +17,14 @@ my %conf = (
 );
 
 sub usage {
-	print STDERR "Usage: quickstart.pl <profile_dir>\n";
+	print STDERR << "EOF";
+Usage: $0 [-hvdf] [-D dir]
+-h        : this (help) message
+-v        : verbose output
+-f        : file containing usersnames, one per line
+-D dir    : directory with quickstart profiles 
+EOF
+
 	exit( 1 );
 }
 
@@ -112,18 +121,23 @@ sub handle_request {
 }
 
 sub main {
+	my %opt;
+	my $opt_string = 'hvfD:';
+	getopts( "$opt_string", \%opt ) or usage();
+	usage() if $opt{h};
 	
+	$conf{debug} = 0 unless $opt{v};
+	# Daemonize
+	Proc::Daemon::Init unless $opt{f};
+	
+	# Start http daemon
 	my $daemon = create_daemon();
 	if(!defined $daemon) {
 		error("Could not create daemon.");
 		exit(1);
 	}
 	
-	if ($#ARGV > 0) {
-		usage();
-	}
-
-	$conf{profile_dir} = abs_path($ARGV[0]) if defined $ARGV[0];
+	$conf{profile_dir} = abs_path($opt{D}) if defined $opt{D};
 
 	unless( -d $conf{profile_dir} ) {
 		error("Profile directory doesn't exist [" . $conf{profile_dir} . "]");
