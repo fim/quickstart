@@ -8,6 +8,10 @@ use Proc::Daemon;
 use HTTP::Daemon;
 use HTTP::Status;
 use Cwd 'abs_path';
+use sigtrap 'handler', \&exit_handler, "INT", "TERM", "QUIT", "ABRT";
+
+my $LOG = "/var/log/quickstart.log";
+my $PID = "/var/run/quickstart.pid";
 
 my %conf = (
 	port => 8899,
@@ -22,21 +26,39 @@ Usage: $0 [-hvdf] [-D dir]
 -h        : this (help) message
 -v        : verbose output
 -f        : file containing usersnames, one per line
+-o file   : log file (applicable only when running as daemon)
 -D dir    : directory with quickstart profiles 
 EOF
 
-	exit( 1 );
+	exit(1);
 }
 
-sub error {
+sub now {
+	my $now = localtime time;
+	return $now;
+}
+
+sub exit_handler { 
+	my $sgn = shift;
+	qlog("Received $sgn signal. Exiting...");
+	if ( -e $PID) { unlink($PID) or qerror("Could not delete pid file: $PID"); }
+	exit(0);
+}
+
+sub qerror {
 	my $msg = shift; 
-	print STDERR "ERROR: " . $msg . "\n";
+	print STDERR "[".now()."] ERROR: " . $msg . "\n";
 }
 
-sub debug {
+sub qlog {
+	my $msg = shift;
+	print "[".now()."] LOG: " . $msg . "\n"; 
+}
+
+sub qdebug {
 	my $msg = shift;
 	if($conf{debug}) {
-		print "DEBUG: " . $msg . "\n";
+		print "[".now()."] DEBUG: " . $msg . "\n";
 	}
 }
 
@@ -67,7 +89,7 @@ sub parse_request_url {
 sub send_response {
 	my ($conn, $response) = @_;
 
-	debug("Sending response: " . $response);
+	qdebug("Sending response: " . $response);
 	$conn->send_basic_header(200);
 	$conn->send_crlf;
 	print $conn $response;
@@ -89,18 +111,24 @@ sub get_profile_path {
 
 sub handle_request {
 	my $conn = shift;
+	my ($path, $args);
 
 	my $request = $conn->get_request;
-	my ($path, $args) = parse_request_url($request->url);
+	if ( defined $request ) { 
+		($path, $args) = parse_request_url($request->url);
+	} else {
+		qdebug("Got invalid request from " . $conn->peerhost() . ":" . $conn->peerport());
+		return;
+	}
 
 	my $debugargs = "";
 	foreach(keys %{$args}) {
 		$debugargs .= ($debugargs ? ", " : "") . $_ . "->" . $args->{$_};
 	}
-	debug("path=" . $path . ", args=" . $debugargs);
+	qdebug("path=" . $path . ", args=" . $debugargs);
 
 	if($request->method ne "GET") {
-		$conn->send_error(RC_FORBIDDEN);
+		$conn->send_qerror(RC_FORBIDDEN);
 		return;
 	}
 
@@ -113,7 +141,7 @@ sub handle_request {
 	} elsif($path eq "/get_profile") {
 		$conn->send_file_response(get_profile_path($args->{mac}));
 	} else {
-		debug("Sending 404");
+		qdebug("Sending 404");
 		$conn->send_basic_header(404);
 		$conn->send_crlf;
 		print $conn "Unknown command";
@@ -122,37 +150,66 @@ sub handle_request {
 
 sub main {
 	my %opt;
-	my $opt_string = 'hvfD:';
+	my $opt_string = 'hvfD:o:';
 	getopts( "$opt_string", \%opt ) or usage();
 	usage() if $opt{h};
-	
+
+
 	$conf{debug} = 0 unless $opt{v};
+	$LOG = abs_path($opt{o}) if defined $opt{o};
+
+	if ( -e $PID ) {
+		qerror("It seems like an instance of quickstartd is already
+	running.  Make sure no other instance is running and
+	then delete file $PID.");
+		exit(1);
+	}
+
+
 	# Daemonize
-	Proc::Daemon::Init unless $opt{f};
+	unless ( defined $opt{f} ) {
+		open(my $flog, ">>$LOG") or die "Cannot open file $LOG: $!\n";	
+		Proc::Daemon::Init;
+		open(STDOUT, ">>$LOG"); 
+		open(STDERR, ">&STDOUT");
+		
+	}
 	
 	# Start http daemon
 	my $daemon = create_daemon();
 	if(!defined $daemon) {
-		error("Could not create daemon.");
+		qerror("Could not create daemon.");
 		exit(1);
 	}
 	
 	$conf{profile_dir} = abs_path($opt{D}) if defined $opt{D};
 
 	unless( -d $conf{profile_dir} ) {
-		error("Profile directory doesn't exist [" . $conf{profile_dir} . "]");
+		qerror("Profile directory doesn't exist [" . $conf{profile_dir} . "]");
 		exit(1);
 	}
-		
-	debug('Profile directory specified is: '. $conf{profile_dir});
+
+	unless ( defined $opt{f} ) {
+		open(FPID,">$PID") or die "Cannot open file $PID: $!\n";
+		print FPID $$;
+		close FPID;
+	}
+	
+	qlog("Starting quickstart server. Listening port is ". $conf{port});
+	qlog("Profile directory located at $conf{profile_dir}");
 
 	# Wait for connection
 	while(my $conn = $daemon->accept) {
-		debug("Accepted connection from " . $conn->peerhost() . ":" . $conn->peerport());
+		qdebug("Accepted connection from " . $conn->peerhost() . ":" . $conn->peerport());
 		handle_request($conn);
 		$conn->close;
-		debug("Connection closed");
+		qdebug("Connection closed");
 	}
 }
 
+$SIG{'HUP'} = 'IGNORE';
+
 main();
+
+# Autoflush buffers
+BEGIN { $| = 1 }
