@@ -62,10 +62,14 @@ format_devnode() {
 fdisk_command() {
   local device=$1
   local cmd=$2
+  local ret=""
 
   debug fdisk_command "running fdisk command '${cmd}' on device ${device}"
   spawn "echo -en '${cmd}\nw\n' | fdisk ${device}"
-  return $?
+  ret=$?
+  sleep 1 # Necessary
+  spawn "partprobe ${device}"
+  return $ret
 }
 
 sanity_check_config_partition() {
